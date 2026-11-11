@@ -199,8 +199,10 @@ function decideLocationHeuristic(jpeg: Buffer): { lat: number; lon: number } {
 const isLat = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= -90 && v <= 90;
 const isLon = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= -180 && v <= 180;
 
-/** The latitude and longitude an answer gives: its first JSON object with lat/lon, else its first two numbers in range. */
-function coordinates(text: string): { lat: number; lon: number } | null {
+/**
+ * Parses the first valid latitude and longitude found in a JSON object within the model text, or null.
+ */
+function parseCoordinatesFromJson(text: string): { lat: number; lon: number } | null {
   for (const m of text.matchAll(/\{[^{}]*\}/g)) {
     try {
       const o = JSON.parse(m[0]) as Record<string, unknown>;
@@ -208,14 +210,51 @@ function coordinates(text: string): { lat: number; lon: number } | null {
       const lon = o.lon ?? o.lng ?? o.longitude;
       if (isLat(lat) && isLon(lon)) return { lat, lon };
     } catch {
-      // Not JSON: the next object, or the numbers below.
+      // Not JSON: try the next object.
     }
   }
+  return null;
+}
+
+/**
+ * Parses the first pair of numbers in valid latitude and longitude range within the model text, or null.
+ */
+function parseCoordinatesFromNumbers(text: string): { lat: number; lon: number } | null {
   const nums = [...text.matchAll(/-?\d+(?:\.\d+)?/g)].map((m) => Number(m[0]));
   for (let i = 0; i + 1 < nums.length; i += 1) {
     if (isLat(nums[i]) && isLon(nums[i + 1])) return { lat: nums[i]!, lon: nums[i + 1]! };
   }
   return null;
+}
+
+/** The latitude and longitude an answer gives: its first JSON object with lat/lon, else its first two numbers in range. */
+function coordinates(text: string): { lat: number; lon: number } | null {
+  return parseCoordinatesFromJson(text) ?? parseCoordinatesFromNumbers(text);
+}
+
+/**
+ * Builds the messages array containing the image inline as base64 and the fixed prompt text for the model.
+ */
+function buildModelMessages(jpeg: Buffer): Array<{ role: 'user'; content: Array<{ type: string; source?: { type: string; media_type: string; data: string }; text?: string }> }> {
+  return [
+    {
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: jpeg.toString('base64') } },
+        { type: 'text', text: MODEL_PROMPT },
+      ],
+    },
+  ];
+}
+
+/**
+ * Extracts and joins text blocks from a model reply with newlines.
+ */
+function extractModelText(msg: { content?: Array<{ type: string; text?: string }> }): string {
+  return (msg.content ?? [])
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text ?? '')
+    .join('\n');
 }
 
 /** One model call for one photo; null when the gateway refused it or it gave no coordinates (the heuristic runs instead). */
