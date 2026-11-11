@@ -96,6 +96,20 @@ const clampLon = (v: number): number => Math.min(180, Math.max(-180, v));
  */
 const DEFAULT_GUESS: { lat: number; lon: number } = { lat: 30, lon: 45 };
 
+/** Summary statistics of coarse pixel fractions across the downsampled image. */
+interface PixelFractions {
+  /** Fraction of sampled pixels identified as vegetation (green). */
+  greenFrac: number;
+  /** Fraction of sampled pixels identified as dry soil or grass. */
+  dryFrac: number;
+  /** Fraction of sampled pixels identified as snow cover. */
+  snowFrac: number;
+  /** Average brightness across sampled pixels. */
+  meanBright: number;
+  /** Total number of pixels sampled. */
+  n: number;
+}
+
 /**
  * The code-only heuristic. It decodes the JPEG and reads four coarse pixel fractions
  * over a deterministic downsample (every pixel at a fixed stride, so the result depends
@@ -111,14 +125,10 @@ const DEFAULT_GUESS: { lat: number; lon: number } = { lat: 30, lon: 45 };
  * These bands are coarse climate belts, not places: the heuristic cannot name a
  * country, let alone a street, and its error will be in the thousands of kilometres.
  */
-function decideLocationHeuristic(jpeg: Buffer): { lat: number; lon: number } {
-  let img;
-  try {
-    img = decodeJpeg(new Uint8Array(jpeg));
-  } catch (err) {
-    process.stderr.write(`entry: cannot decode a photo, using the default guess: ${(err as Error).message}\n`);
-    return { ...DEFAULT_GUESS };
-  }
+/**
+ * Measures coarse pixel fractions and statistics over a deterministic downsample of the decoded image.
+ */
+function measurePixelFractions(img: { width: number; height: number; data: Uint8Array | Uint8ClampedArray }): PixelFractions {
   const { width, height, data } = img;
   const stepX = Math.max(1, Math.floor(width / 64));
   const stepY = Math.max(1, Math.floor(height / 36));
@@ -140,16 +150,44 @@ function decideLocationHeuristic(jpeg: Buffer): { lat: number; lon: number } {
       brightSum += (r + g + b) / 3;
     }
   }
-  if (n === 0) return { ...DEFAULT_GUESS };
-  const greenFrac = green / n;
-  const dryFrac = dry / n;
-  const snowFrac = snow / n;
-  const meanBright = brightSum / n;
-  let lat: number;
-  if (snowFrac >= 0.2) lat = 58;
-  else if (dryFrac >= 0.4 && greenFrac < 0.15) lat = 23;
-  else if (greenFrac >= 0.35) lat = meanBright >= 120 ? 8 : 45;
-  else lat = DEFAULT_GUESS.lat;
+  if (n === 0) {
+    return { greenFrac: 0, dryFrac: 0, snowFrac: 0, meanBright: 0, n: 0 };
+  }
+  return {
+    greenFrac: green / n,
+    dryFrac: dry / n,
+    snowFrac: snow / n,
+    meanBright: brightSum / n,
+    n,
+  };
+}
+
+/**
+ * Decides the latitude band based on pixel fractions and brightness statistics.
+ */
+function decideLatitude(fractions: PixelFractions): number {
+  const { greenFrac, dryFrac, snowFrac, meanBright } = fractions;
+  if (snowFrac >= 0.2) return 58;
+  if (dryFrac >= 0.4 && greenFrac < 0.15) return 23;
+  if (greenFrac >= 0.35) return meanBright >= 120 ? 8 : 45;
+  return DEFAULT_GUESS.lat;
+}
+
+/**
+ * The code-only heuristic. It decodes the JPEG, measures pixel fractions,
+ * decides the latitude band, and returns latitude and longitude guesses.
+ */
+function decideLocationHeuristic(jpeg: Buffer): { lat: number; lon: number } {
+  let img;
+  try {
+    img = decodeJpeg(new Uint8Array(jpeg));
+  } catch (err) {
+    process.stderr.write(`entry: cannot decode a photo, using the default guess: ${(err as Error).message}\n`);
+    return { ...DEFAULT_GUESS };
+  }
+  const fractions = measurePixelFractions(img);
+  if (fractions.n === 0) return { ...DEFAULT_GUESS };
+  const lat = decideLatitude(fractions);
   return { lat, lon: DEFAULT_GUESS.lon };
 }
 
