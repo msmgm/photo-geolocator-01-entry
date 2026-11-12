@@ -1,18 +1,32 @@
+// ============================================================================
+// VENDOR/JPEG-DECODER.TS: DETAILED ARCHITECTURAL OVERVIEW
+// ============================================================================
 // Minimal baseline JPEG decoder (sequential DCT, 8-bit samples), standard library only.
 //
-// What it covers, and why that is enough here: the photos in this competition are
-// ordinary libjpeg-style files (SOF0, 8-bit, 1 or 3 components, sampling factors 1 or 2
-// per axis, no restart markers in practice). This decoder handles exactly that family:
-//   - baseline sequential DCT (SOF0), 8-bit samples
-//   - 1 component (grayscale) or 3 components (YCbCr)
-//   - sampling factors 1x1, 2x1, 1x2, 2x2 per component
-//   - standard and custom quantisation and Huffman tables
-//   - restart markers (DRI), if present, by resetting the DC predictors at each interval
-// It refuses progressive (SOF2), 12-bit and 4-component files instead of guessing: the
-// caller falls back to the default guess for a photo it cannot decode.
+// 1. MARKER PARSING & STREAM PROCESSING
+//    - Scans binary streams for 0xFF markers: SOI (0xD8), DQT (0xDB), SOF0 (0xC0),
+//      DHT (0xC4), DRI (0xDD), SOS (0xDA), and EOI (0xD9).
+//    - Handles byte-stuffing where 0xFF00 in entropy-coded data unstuffs to 0xFF.
+//    - Extracts quantization and Huffman tables, frame dimensions, component sampling,
+//      and restart interval configurations.
 //
-// It is written from the JPEG specification (ITU T.81), not copied from a library, so the
-// repository carries no third-party code here beyond the kit's own agent SDK.
+// 2. HUFFMAN DECODING & ENTROPY BITSTREAM
+//    - Constructs canonical Huffman tables from DHT code length counts and symbols.
+//    - Decodes variable-length prefix codes bit-by-bit via a custom BitReader.
+//    - Performs JPEG receive-and-extend on coefficient magnitude bits for DC differences
+//      and AC run-length symbols (zigzag reordered).
+//
+// 3. INVERSE DISCRETE COSINE TRANSFORM (IDCT)
+//    - Applies 2-D separable inverse DCT to each decoded 8x8 block of coefficients.
+//    - Computes vertical and horizontal sums using precomputed cosine tables and
+//      normalization factors C(u) to transform frequency domain blocks back to spatial pixels.
+//
+// 4. COLOR SPACE CONVERSION & RGB OUTPUT FORMAT
+//    - Converts YCbCr components to RGB using standard color transformation equations.
+//    - Upsamples chroma planes using nearest-neighbour mapping according to component
+//      sampling factors (1x1, 2x1, 1x2, 2x2).
+//    - Outputs a packed row-major Uint8Array buffer of width * height * 3 bytes (RGB).
+// ============================================================================
 
 export interface DecodedImage {
   width: number;

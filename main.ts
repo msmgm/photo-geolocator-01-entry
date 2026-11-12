@@ -368,6 +368,35 @@ function sortPhotos(photoList: Photo[]): Photo[] {
   return photoList.filter((p) => !p.answered).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
+/**
+ * Posts the collected answers to the environment URL with retry and error handling.
+ */
+async function postAnswers(envUrl: string, answers: Guess[]): Promise<number> {
+  // One POST, in photo order. A 409 means the answers are already recorded.
+  for (let attempt = 0; ; attempt += 1) {
+    let res: Response;
+    try {
+      res = await fetch(`${envUrl}/answers`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ answers }),
+      });
+    } catch (err) {
+      if (attempt >= 1) throw err;
+      await sleep(1000);
+      continue;
+    }
+    const text = await res.text();
+    process.stdout.write(`entry: ${answers.length} of ${answers.length} photos answered: HTTP ${res.status} ${text}\n`);
+    if (res.ok || res.status === 409) return 0;
+    if (res.status >= 500 && attempt < 1) {
+      await sleep(1000);
+      continue;
+    }
+    return 1;
+  }
+}
+
 async function main(): Promise<number> {
   // The brief: the one file the trial hands the entry. Read, not parsed for decisions
   // here (the model prompt above is fixed); its first line is logged for transparency.
@@ -408,29 +437,7 @@ async function main(): Promise<number> {
     process.stderr.write('entry: no answers to post\n');
     return 1;
   }
-  // One POST, in photo order. A 409 means the answers are already recorded.
-  for (let attempt = 0; ; attempt += 1) {
-    let res: Response;
-    try {
-      res = await fetch(`${envUrl}/answers`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ answers }),
-      });
-    } catch (err) {
-      if (attempt >= 1) throw err;
-      await sleep(1000);
-      continue;
-    }
-    const text = await res.text();
-    process.stdout.write(`entry: ${answers.length} of ${photos.length} photos answered: HTTP ${res.status} ${text}\n`);
-    if (res.ok || res.status === 409) return 0;
-    if (res.status >= 500 && attempt < 1) {
-      await sleep(1000);
-      continue;
-    }
-    return 1;
-  }
+  return await postAnswers(envUrl, answers);
 }
 
 try {
