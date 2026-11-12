@@ -49,6 +49,27 @@ import { Anthropic } from './vendor/makefun-agent.ts';
 import { decodeJpeg } from './vendor/jpeg-decoder.ts';
 
 // ---------------------------------------------------------------- configuration
+// -----------------------------------------------------------------------------
+// CONFIGURATION PARAMETERS
+// -----------------------------------------------------------------------------
+// This section defines operational parameters governing model execution,
+// concurrency limits, and error recovery behavior across the pipeline:
+//
+// - USE_MODEL: A boolean switch controlling whether the vision model pipeline is
+//   enabled or whether the code-only pixel heuristic runs instead. Must remain
+//   false unless an authorized provider API key secret is available.
+// - MODEL: Identifies the specific model identifier string (claude-sonnet-5-5)
+//   passed to the Anthropic gateway API during vision inference requests.
+// - MODEL_MAX_TOKENS: Specifies the maximum output token budget (1024) allocated
+//   for model response generation.
+// - MODEL_PROMPT: The standardized prompt string instructing the vision model to
+//   analyze the photo and return estimated coordinates as a single line of JSON.
+// - CONCURRENCY: Determines the worker pool size (4) for parallel photo fetching
+//   and location estimation, balancing throughput and network load.
+// - RETRY_STATUSES & RETRIES: Defines which transient HTTP status codes (such as
+//   timeouts and rate limits) trigger up to 2 retry attempts with exponential
+//   backoff, while non-retryable errors fail immediately.
+// -----------------------------------------------------------------------------
 
 /** PLACEHOLDER SWITCH: keep false until a provider key is pushed as a secret. */
 const USE_MODEL = false;
@@ -62,13 +83,34 @@ const CONCURRENCY = 4;
 const RETRY_STATUSES = [408, 429, 500, 502, 503, 504, 529];
 const RETRIES = 2;
 
-/** One photo's answer. */
+/**
+ * Represents the final computed geolocation answer submitted for a single photo.
+ * 
+ * Fields:
+ * - id: The unique string identifier corresponding to the target photo being answered.
+ * - lat: The estimated latitude coordinate in decimal degrees (-90 to 90),
+ *   normalized and clamped for accuracy.
+ * - lon: The estimated longitude coordinate in decimal degrees (-180 to 180),
+ *   normalized and clamped for accuracy.
+ * 
+ * Used during batch payload construction and submitted via POST /answers.
+ */
 interface Guess {
   id: string;
   lat: number;
   lon: number;
 }
 
+/**
+ * Represents a photo metadata object retrieved from the environment photo endpoint.
+ * 
+ * Fields:
+ * - id: The unique string identifier assigned to the photo asset by the trial environment.
+ * - url: The relative URL path used to fetch the raw JPEG binary data for the photo.
+ * - answered: A boolean flag indicating whether the photo has already received a recorded answer.
+ * 
+ * Used for filtering unanswered items, sorting deterministically, and fetching image buffers.
+ */
 interface Photo {
   id: string;
   url: string;
@@ -89,6 +131,16 @@ function validateEnvironment(): { promptFile: string; envUrl: string } {
   const promptFile = need('MAKEFUN_PROMPT_FILE');
   const envUrl = need('MAKEFUN_ENV_URL').replace(/\/+$/, '');
   return { promptFile, envUrl };
+}
+
+/**
+ * Reads the trial brief file from the specified path, logs its first line to stderr for transparency,
+ * and returns the full brief text.
+ */
+function readBrief(promptFile: string): string {
+  const prompt = readFileSync(promptFile, 'utf-8');
+  process.stderr.write(`entry: brief ${promptFile}: ${(prompt.split('\n')[0] ?? '').slice(0, 120)}\n`);
+  return prompt;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -389,6 +441,14 @@ function sortPhotos(photoList: Photo[]): Photo[] {
 }
 
 /**
+ * Creates an array of the specified photo count filled with null,
+ * used for holding guesses by photo index before submission.
+ */
+function createGuessesArray(count: number): (Guess | null)[] {
+  return new Array(count).fill(null);
+}
+
+/**
  * Serializes the array of answers into a JSON string payload for the POST request body.
  */
 function buildAnswersPayload(answers: Guess[]): string {
@@ -446,8 +506,7 @@ async function main(): Promise<number> {
   // The brief: the one file the trial hands the entry. Read, not parsed for decisions
   // here (the model prompt above is fixed); its first line is logged for transparency.
   const { promptFile, envUrl } = validateEnvironment();
-  const prompt = readFileSync(promptFile, 'utf-8');
-  process.stderr.write(`entry: brief ${promptFile}: ${(prompt.split('\n')[0] ?? '').slice(0, 120)}\n`);
+  const prompt = readBrief(promptFile);
   // The trial seed: read for the record. This version draws no randomness from it; any
   // future seeded choice must use it (never Math.random() or a clock).
   const seed = process.env.MAKEFUN_TRIAL_SEED ?? 'photo-geolocator-01';
@@ -455,7 +514,7 @@ async function main(): Promise<number> {
 
   const listed = (await getJson(`${envUrl}/photos`)) as { photos: Photo[] };
   const photos = sortPhotos(listed.photos);
-  const guesses: (Guess | null)[] = new Array(photos.length).fill(null);
+  const guesses: (Guess | null)[] = createGuessesArray(photos.length);
   let next = 0;
   const worker = async (): Promise<void> => {
     while (next < photos.length) {
