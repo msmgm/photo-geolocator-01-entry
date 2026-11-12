@@ -81,6 +81,16 @@ function need(name: string): string {
   return v;
 }
 
+/**
+ * Validates and retrieves required environment variables for the trial prompt file and environment URL,
+ * stripping any trailing slashes from the environment URL.
+ */
+function validateEnvironment(): { promptFile: string; envUrl: string } {
+  const promptFile = need('MAKEFUN_PROMPT_FILE');
+  const envUrl = need('MAKEFUN_ENV_URL').replace(/\/+$/, '');
+  return { promptFile, envUrl };
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const round6 = (v: number): number => Math.round(v * 1e6) / 1e6;
 const clampLat = (v: number): number => Math.min(90, Math.max(-90, v));
@@ -345,6 +355,16 @@ async function decideLocation(jpeg: Buffer, id: string): Promise<{ lat: number; 
 
 // ------------------------------------------------------------------------ main
 
+/**
+ * Performs an HTTP GET request to the specified URL to retrieve JSON data.
+ * 
+ * Features and Behavior:
+ * - Sets the `accept` header to `application/json` to negotiate JSON response format.
+ * - Awaits the fetch response and checks the `ok` status property.
+ * - Throws a descriptive Error if the response status is not successful (non-2xx).
+ * - Parses and returns the response body as JSON cast to unknown.
+ * - Used primarily for fetching structured environment resources such as the photo list.
+ */
 async function getJson(url: string): Promise<unknown> {
   const res = await fetch(url, { headers: { accept: 'application/json' } });
   if (!res.ok) throw new Error(`GET ${url} answered HTTP ${res.status}`);
@@ -369,6 +389,13 @@ function sortPhotos(photoList: Photo[]): Photo[] {
 }
 
 /**
+ * Serializes the array of answers into a JSON string payload for the POST request body.
+ */
+function buildAnswersPayload(answers: Guess[]): string {
+  return JSON.stringify({ answers });
+}
+
+/**
  * Posts the collected answers to the environment URL with retry and error handling.
  */
 async function postAnswers(envUrl: string, answers: Guess[]): Promise<number> {
@@ -379,7 +406,7 @@ async function postAnswers(envUrl: string, answers: Guess[]): Promise<number> {
       res = await fetch(`${envUrl}/answers`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ answers }),
+        body: buildAnswersPayload(answers),
       });
     } catch (err) {
       if (attempt >= 1) throw err;
@@ -397,13 +424,30 @@ async function postAnswers(envUrl: string, answers: Guess[]): Promise<number> {
   }
 }
 
+/**
+ * Orchestrates the end-to-end photo geolocation execution pipeline:
+ * 
+ * 1. Environment Validation:
+ *    - Validates and retrieves required environment variables for the prompt file and environment URL.
+ * 2. Brief Reading:
+ *    - Reads the trial brief file and logs the first line for transparency.
+ * 3. Photo Discovery:
+ *    - Fetches and parses the list of photos from the environment endpoint.
+ *    - Filters out already answered photos and sorts the remaining items deterministically by ID.
+ * 4. Concurrent Processing Worker Pool:
+ *    - Spawns a concurrent worker pool governed by the CONCURRENCY constant.
+ *    - Fetches each photo image buffer and decides its geolocation using model or heuristic.
+ *    - Normalizes coordinates and stores results in a deterministic sequence order.
+ * 5. Answer Submission:
+ *    - Serializes collected guesses into a JSON payload and posts them back to the environment.
+ *    - Returns exit code 0 on success or 1 on failure.
+ */
 async function main(): Promise<number> {
   // The brief: the one file the trial hands the entry. Read, not parsed for decisions
   // here (the model prompt above is fixed); its first line is logged for transparency.
-  const promptFile = need('MAKEFUN_PROMPT_FILE');
+  const { promptFile, envUrl } = validateEnvironment();
   const prompt = readFileSync(promptFile, 'utf-8');
   process.stderr.write(`entry: brief ${promptFile}: ${(prompt.split('\n')[0] ?? '').slice(0, 120)}\n`);
-  const envUrl = need('MAKEFUN_ENV_URL').replace(/\/+$/, '');
   // The trial seed: read for the record. This version draws no randomness from it; any
   // future seeded choice must use it (never Math.random() or a clock).
   const seed = process.env.MAKEFUN_TRIAL_SEED ?? 'photo-geolocator-01';
