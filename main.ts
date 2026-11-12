@@ -117,6 +117,16 @@ interface Photo {
   answered: boolean;
 }
 
+/**
+ * Reads a required environment variable by name.
+ * 
+ * Validates that the environment variable exists and is not empty.
+ * Throws a clear descriptive error if the variable is missing or empty,
+ * preventing execution with unconfigured settings.
+ * 
+ * @param name - The name of the environment variable to retrieve.
+ * @returns The string value of the environment variable.
+ */
 function need(name: string): string {
   const v = process.env[name];
   if (v === undefined || v === '') throw new Error(`${name} is not set`);
@@ -143,6 +153,16 @@ function readBrief(promptFile: string): string {
   return prompt;
 }
 
+/**
+ * Returns a promise that resolves after the given milliseconds.
+ * 
+ * Provides an asynchronous delay mechanism used primarily during retry
+ * backoff sequences (such as rate limits and network errors) to space
+ * out subsequent HTTP requests.
+ * 
+ * @param ms - The delay duration in milliseconds.
+ * @returns A promise that resolves when the timer expires.
+ */
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const round6 = (v: number): number => Math.round(v * 1e6) / 1e6;
 const clampLat = (v: number): number => Math.min(90, Math.max(-90, v));
@@ -396,7 +416,20 @@ async function decideLocationWithModel(jpeg: Buffer, id: string): Promise<{ lat:
   }
 }
 
-/** The geolocation decision for one photo: the model when enabled, else the heuristic. */
+/**
+ * Decides the geographic coordinates for a given photo JPEG buffer and identifier.
+ * 
+ * Chooses the vision model path when USE_MODEL is true and falls back to
+ * the deterministic pixel heuristic otherwise.
+ * 
+ * The function signature remains identical across both execution paths,
+ * accepting the JPEG buffer and photo ID and returning the estimated
+ * latitude and longitude coordinates.
+ * 
+ * @param jpeg - The raw JPEG buffer of the photo.
+ * @param id - The unique photo identifier.
+ * @returns An object containing the estimated lat and lon coordinates.
+ */
 async function decideLocation(jpeg: Buffer, id: string): Promise<{ lat: number; lon: number }> {
   if (USE_MODEL) {
     const fromModel = await decideLocationWithModel(jpeg, id);
@@ -434,10 +467,20 @@ async function fetchPhoto(envUrl: string, p: Photo): Promise<Buffer> {
 }
 
 /**
+ * Determines whether a photo has already been answered.
+ * 
+ * @param p - The photo metadata object to check.
+ * @returns True if the answered flag is set, false otherwise.
+ */
+function isPhotoAnswered(p: Photo): boolean {
+  return p.answered;
+}
+
+/**
  * Filters the photo list to keep only unanswered photos and sorts them by id.
  */
 function sortPhotos(photoList: Photo[]): Photo[] {
-  return photoList.filter((p) => !p.answered).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return photoList.filter((p) => !isPhotoAnswered(p)).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
 /**
