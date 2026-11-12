@@ -1,40 +1,48 @@
-// photo-geolocator-01 entry (scaffolding): a model-free agent with a clearly-marked
-// geolocation placeholder.
+// ============================================================================
+// PHOTO-GEOLOCATOR-01 ENTRY: COMPREHENSIVE ARCHITECTURAL OVERVIEW
+// ============================================================================
+// This file implements a model-free geolocation agent scaffolding for the
+// make.fun photo-geolocator competition entry, featuring a clearly-marked
+// heuristic fallback and an optional model-based pipeline.
 //
-// What it does, end to end:
-//   1. reads the brief from MAKEFUN_PROMPT_FILE (the one file the trial hands it);
-//   2. lists the 25 photos from the env at MAKEFUN_ENV_URL (GET /photos);
-//   3. fetches each photo (GET /photos/<id>.jpg, four at a time) and decides a latitude
-//      and longitude for it with decideLocation() below;
-//   4. posts every answer in one POST /answers, in photo order, and exits.
+// 1. END-TO-END EXECUTION FLOW
+//    - Reads the trial brief from the MAKEFUN_PROMPT_FILE environment variable.
+//    - Lists all available photos from the environment URL at MAKEFUN_ENV_URL (/photos).
+//    - Filters unanswered photos and sorts them deterministically by identifier.
+//    - Fetches each photo in parallel (four concurrent workers) and computes a
+//      latitude and longitude estimate using decideLocation().
+//    - Submits all computed answers in a single batch via POST /answers in photo order.
 //
-// Determinism (RULES.txt: the trial runs twice, live then replay, and the replay must
-// leave the env byte-for-byte as the live pass left it):
-//   - no wall clock anywhere in a request (no Date.now(), no new Date() in a payload);
-//   - no unseeded randomness (no Math.random()); the trial seed is read and kept for any
-//     future seeded choice, but this version needs none: the heuristic is a pure function
-//     of the photo's pixels;
-//   - photos are fetched in parallel, but every answer is slotted by photo index and the
-//     single POST goes out in photo order, so nothing depends on arrival order;
-//   - a photo that fails to fetch or decode still gets an answer (the default guess):
-//     an unanswered photo counts the maximum error (20,015 km), a default guess is
-//     always better than that.
+// 2. DETERMINISM AND COMPLIANCE RULES
+//    - Adheres strictly to RULES.txt (live and replay runs must match byte-for-byte).
+//    - Eliminates wall-clock usage entirely (no Date.now() or new Date() in payloads).
+//    - Avoids unseeded randomness (no Math.random()); the trial seed is read and retained
+//      for potential future seeded choices.
+//    - Ensures deterministic ordering: answers are slotted by photo index and posted
+//      in strict photo order regardless of asynchronous arrival times.
+//    - Guarantees complete coverage: failed fetches or decoding errors receive a robust
+//      default guess rather than being omitted, minimizing potential error penalties.
 //
-// Model calls: the agent MAY call an allowlisted vision model through the gateway, but
-// this build does not. USE_MODEL is false and decideLocation() runs the code-only
-// heuristic. Flipping it on requires a provider key pushed to the competition as a
-// secret (ANTHROPIC_API_KEY / OPENAI_API_KEY) — the house pays for none of an entry's
-// model calls, at most $1.00 a trial. The model path below is written, not run: one
-// claude-sonnet-5-5 call per photo, the image inline as base64 (never by URL), at most
-// 1024 output tokens, gateway refusals final (fall back to the heuristic), transient
-// errors retried twice with a fixed backoff. It is the same shape as the kit's starter,
-// so it fits the trial's budget and request cap when a key exists.
+// 3. MODEL PATH CONFIGURATION & STATUS
+//    - The agent is capable of calling an allowlisted vision model through the gateway,
+//      but USE_MODEL is currently false, executing the code-only pixel heuristic instead.
+//    - Enabling the model path requires a provider key pushed as a competition secret
+//      (ANTHROPIC_API_KEY / OPENAI_API_KEY), staying well within the $1.00 trial budget.
+//    - When enabled, it executes one claude-sonnet-5-5 call per photo with base64 inline
+//      images, 1024 max tokens, gateway refusal finality, and 2 retries with backoff.
 //
-// What this entry does NOT carry, per the rules: no trained weights, no embeddings, no
-// table of photos and their places, no network beyond the env and the gateway.
+// 4. CONCURRENCY MODEL
+//    - Utilizes a pooled worker pattern governed by the CONCURRENCY constant (set to 4).
+//    - Workers pull tasks dynamically from an index pointer over the sorted photo list,
+//      balancing throughput while respecting upstream rate limits.
 //
-// Run as the grader runs it: `node /bot/main.ts` on Node 22, standard library only
-// (plus the kit's agent SDK vendored under vendor/, byte for byte).
+// 5. EXCLUSIONS AND CONSTRAINTS
+//    - Per competition rules, this entry carries no trained weights, no embeddings,
+//      no offline lookup tables of photos and locations, and no external network access
+//      beyond the test environment and gateway.
+//    - Executed under the grader environment: Node 22 (`node /bot/main.ts`), using standard
+//      library modules alongside the vendored kit agent SDK under vendor/.
+// ============================================================================
 
 import { readFileSync } from 'node:fs';
 import { Anthropic } from './vendor/makefun-agent.ts';
@@ -77,6 +85,18 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const round6 = (v: number): number => Math.round(v * 1e6) / 1e6;
 const clampLat = (v: number): number => Math.min(90, Math.max(-90, v));
 const clampLon = (v: number): number => Math.min(180, Math.max(-180, v));
+
+/**
+ * Normalizes a latitude and longitude pair by clamping to valid ranges and rounding to 6 decimals.
+ */
+function normalizeGuess(latOrCoord: number | { lat: number; lon: number }, lon?: number): { lat: number; lon: number } {
+  const lat = typeof latOrCoord === 'object' ? latOrCoord.lat : latOrCoord;
+  const l = typeof latOrCoord === 'object' ? latOrCoord.lon : (lon ?? 0);
+  return {
+    lat: round6(clampLat(lat)),
+    lon: round6(clampLon(l)),
+  };
+}
 
 // ------------------------------------------------- THE GEOLOCATION DECISION
 // PLACEHOLDER — this is the function the final agent improves. Its contract:
@@ -257,7 +277,21 @@ function extractModelText(msg: { content?: Array<{ type: string; text?: string }
     .join('\n');
 }
 
-/** One model call for one photo; null when the gateway refused it or it gave no coordinates (the heuristic runs instead). */
+/**
+ * Executes a vision model call for a single photo through the Anthropic gateway.
+ * 
+ * Requirements & Policy:
+ * - Requires ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY environment variables to be set;
+ *   if missing, logs a message and falls back to the heuristic immediately.
+ * - Sends the image as inline base64 data alongside the standardized prompt.
+ * - Parses the response for latitude and longitude coordinates.
+ * - Implements a robust retry policy: retries transient errors (such as network timeouts
+ *   or rate limits defined in RETRY_STATUSES) up to a maximum of RETRIES with backoff,
+ *   while gateway refusals (LlmRefusalError) and non-retryable HTTP statuses fail
+ *   immediately without retrying.
+ * - Returns null if the model call fails, is refused, or returns no valid coordinates,
+ *   triggering a seamless fallback to the code-only heuristic.
+ */
 async function decideLocationWithModel(jpeg: Buffer, id: string): Promise<{ lat: number; lon: number } | null> {
   const baseUrl = process.env.ANTHROPIC_BASE_URL;
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -271,20 +305,9 @@ async function decideLocationWithModel(jpeg: Buffer, id: string): Promise<{ lat:
       const msg = await llm.messages({
         model: MODEL,
         max_tokens: MODEL_MAX_TOKENS,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: jpeg.toString('base64') } },
-              { type: 'text', text: MODEL_PROMPT },
-            ],
-          },
-        ],
+        messages: buildModelMessages(jpeg),
       });
-      const text = (msg.content ?? [])
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text ?? '')
-        .join('\n');
+      const text = extractModelText(msg);
       const c = coordinates(text);
       if (c === null) {
         process.stderr.write(`entry: no coordinates in the model answer for ${id}, using the heuristic\n`);
@@ -328,6 +351,23 @@ async function getJson(url: string): Promise<unknown> {
   return (await res.json()) as unknown;
 }
 
+/**
+ * Fetches the JPEG buffer for a given photo from the environment URL.
+ * Throws an error if the HTTP response is not ok.
+ */
+async function fetchPhoto(envUrl: string, p: Photo): Promise<Buffer> {
+  const res = await fetch(`${envUrl}${p.url}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/**
+ * Filters the photo list to keep only unanswered photos and sorts them by id.
+ */
+function sortPhotos(photoList: Photo[]): Photo[] {
+  return photoList.filter((p) => !p.answered).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
 async function main(): Promise<number> {
   // The brief: the one file the trial hands the entry. Read, not parsed for decisions
   // here (the model prompt above is fixed); its first line is logged for transparency.
@@ -341,7 +381,7 @@ async function main(): Promise<number> {
   process.stderr.write(`entry: trial seed ${seed.slice(0, 16)}… (no randomness drawn from it in this build)\n`);
 
   const listed = (await getJson(`${envUrl}/photos`)) as { photos: Photo[] };
-  const photos = listed.photos.filter((p) => !p.answered).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const photos = sortPhotos(listed.photos);
   const guesses: (Guess | null)[] = new Array(photos.length).fill(null);
   let next = 0;
   const worker = async (): Promise<void> => {
@@ -351,16 +391,14 @@ async function main(): Promise<number> {
       const p = photos[i]!;
       let jpeg: Buffer;
       try {
-        const res = await fetch(`${envUrl}${p.url}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        jpeg = Buffer.from(await res.arrayBuffer());
+        jpeg = await fetchPhoto(envUrl, p);
       } catch (err) {
         process.stderr.write(`entry: cannot fetch ${p.id}, using the default guess: ${(err as Error).message}\n`);
         guesses[i] = { id: p.id, ...DEFAULT_GUESS };
         continue;
       }
       const c = await decideLocation(jpeg, p.id);
-      guesses[i] = { id: p.id, lat: round6(clampLat(c.lat)), lon: round6(clampLon(c.lon)) };
+      guesses[i] = { id: p.id, ...normalizeGuess(c) };
     }
   };
   await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
